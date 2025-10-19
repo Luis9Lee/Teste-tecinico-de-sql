@@ -1,0 +1,76 @@
+from pyspark.sql.functions import col, avg, round, min, max, count, when, lit, desc
+from pyspark.sql.window import Window
+
+# --- 1. SIMULAÇÃO DA LEITURA DOS DATASETS ---
+
+silver_data = [
+    ('municipio_A', 1000.0, 10.0, 10, 'Homens', 'Branca', 100.0),
+    ('municipio_A', 2000.0, 20.0, 20, 'Mulheres', 'Preta', 100.0),
+    ('municipio_B', 1500.0, 15.0, 15, 'Homens', 'Parda', 100.0),
+    ('municipio_C', 50.0, 50.0, 5, 'Mulheres', 'Branca', 1.0),
+    ('municipio_D', 50000.0, 50.0, 500, 'Homens', 'Amarela', 100.0),
+    ('municipio_E', 1000.0, 0.0, 10, 'Mulheres', 'Indígena', None)
+]
+silver_cols = ['id_geografia', 'renda_total_nominal', 'populacao_ocupada', 'densidade_demografica_hab_km2', 'sexo', 'cor_ou_raca', 'rendimento_medio_mensal']
+df_silver = spark.createDataFrame(silver_data, silver_cols)
+df_silver.createOrReplaceTempView("silver_censo_view")
+
+gold_data = [
+    ('Rendimento Médio Mensal Geral', 'Geral', None, 66.83),
+    ('Rendimento Médio Mensal por Sexo', 'Homens', 'SEXO', 100.00),
+    ('Rendimento Médio Mensal por Sexo', 'Mulheres', 'SEXO', 50.50),
+    ('Rendimento Médio Mensal por Cor/Raça', 'Branca', 'COR_RACA', 50.50),
+    ('Rendimento Médio Mensal por Cor/Raça', 'Preta', 'COR_RACA', 100.00),
+    ('Rendimento Médio Mensal por Cor/Raça', 'Parda', 'COR_RACA', 100.00)
+]
+gold_cols = ['indicador_tipo', 'categoria_agregada', 'agrupamento', 'valor_medio_mensal']
+df_gold = spark.createDataFrame(gold_data, gold_cols)
+df_gold.createOrReplaceTempView("gold_indicadores_view")
+
+
+# --- 2. FUNÇÕES DE QUALIDADE E AUDITORIA ---
+
+def check_null_counts(df, columns):
+    df.select([count(when(col(c).isNull(), c)).alias(f"NULOS_{c}") for c in columns]).show()
+
+def validate_outliers(df, column):
+    df.filter(col(column).isNotNull()) \
+      .select(
+          round(min(col(column)), 2).alias(f"MIN_{column}"),
+          round(max(col(column)), 2).alias(f"MAX_{column}")
+      ).show()
+
+check_null_counts(df_silver, ["renda_total_nominal", "populacao_ocupada", "rendimento_medio_mensal"])
+validate_outliers(df_silver, "rendimento_medio_mensal")
+
+
+# --- 3. FUNÇÕES DE ANÁLISE EXPLORATÓRIA ---
+
+def top_n_rendimentos_por_categoria(df_gold, agrupamento, n=3):
+    print(f"\n--- TOP {n} Rendimentos por {agrupamento} ---")
+    df_gold.filter(col("agrupamento") == agrupamento) \
+           .orderBy(desc("valor_medio_mensal")) \
+           .limit(n) \
+           .select("categoria_agregada", "valor_medio_mensal") \
+           .show(truncate=False)
+
+def rendimento_relativo_ao_geral(df_silver, df_gold):
+    print("\n--- Rendimento Relativo à Média Geral ---")
+    
+    df_media_geral = df_gold.filter(col("categoria_agregada") == "Geral") \
+                            .select(col("valor_medio_mensal").alias("media_geral"))
+
+    df_enriched = df_silver.crossJoin(df_media_geral)
+    
+    df_enriched.withColumn(
+        "percentual_acima_media",
+        round(((col("rendimento_medio_mensal") / col("media_geral")) - 1) * 100, 2)
+    ) \
+    .select("id_geografia", "sexo", "rendimento_medio_mensal", "media_geral", "percentual_acima_media") \
+    .filter(col("rendimento_medio_mensal").isNotNull()) \
+    .orderBy(desc("percentual_acima_media")) \
+    .show(5, truncate=False)
+
+top_n_rendimentos_por_categoria(df_gold, agrupamento="SEXO", n=5)
+top_n_rendimentos_por_categoria(df_gold, agrupamento="COR_RACA", n=5)
+rendimento_relativo_ao_geral(df_silver, df_gold)
